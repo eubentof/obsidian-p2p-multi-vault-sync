@@ -31,6 +31,8 @@ Obsync is an alternative that keeps your notes on your devices:
   pairs with a phone over a shared hotspot.
 - **Near-instant** — vault changes propagate within a few hundred milliseconds
   (the mobile polls every 250 ms; both sides sync ~150 ms after an edit).
+- **Multiple desktop vaults** — each vault can listen on its own port, with
+  automatic fallback to the next free port when the preferred one is occupied.
 
 ## Requirements
 
@@ -64,6 +66,21 @@ Obsync is an alternative that keeps your notes on your devices:
    **Approve**.
 4. Tap **Sync now** again on the phone. Done — from here on it syncs
    automatically, and the phone reconnects on every launch.
+
+### Running several desktop vaults
+
+Each vault stores its own listening port in **Settings → Obsync → Server port**.
+The default is `42042`. If it is already occupied when the server starts, the
+plugin tries `42043`, then `42044`, and so on until a port is available. The
+chosen port is saved for that vault and shown under **Sync server**. You can
+also enter a preferred port in Settings; changing it while running switches
+listeners without closing the existing one unless the replacement starts.
+
+Mobile auto-discovery still searches the default port only. For a desktop vault
+using another port, enter the desktop's LAN IP and the displayed port in the
+mobile **Server address (advanced)** field (for example,
+`http://192.168.1.5:42043`). Pair each mobile vault with its corresponding
+desktop vault.
 
 > Auto-discovery never guesses: a host is accepted only if it answers the
 > Obsync ping with a valid protocol message, so an unrelated service on the

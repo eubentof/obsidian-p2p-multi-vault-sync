@@ -9,6 +9,8 @@ import {
   decodeMessage,
   RPC_PATH,
   normalizeServerUrl,
+  startRawRpcServer,
+  startServerWithPortFallback,
 } from "../src/core/transport";
 import { ProtocolMessage, newMessage } from "../src/core/protocol";
 
@@ -101,5 +103,46 @@ describe("normalizeServerUrl", () => {
   it("returns empty input unchanged", () => {
     expect(normalizeServerUrl("")).toBe("");
     expect(normalizeServerUrl("   ")).toBe("");
+  });
+});
+
+describe("per-vault server ports", () => {
+  const echo = async (body: string) => body;
+
+  it("runs two independent listeners on consecutive ports when the preferred port is occupied", async () => {
+    const first = await startRawRpcServer(echo, 0);
+    let second: HttpServerHandle | null = null;
+    try {
+      // An ephemeral port at 65535 cannot have a next port.
+      if (first.port === 65535) return;
+      second = await startServerWithPortFallback(echo, first.port);
+      expect(second.port).toBe(first.port + 1);
+    } finally {
+      await second?.close();
+      await first.close();
+    }
+  });
+
+  it("only advances on EADDRINUSE and preserves unexpected errors", async () => {
+    const attempted: number[] = [];
+    const start = async (_handler: typeof echo, port: number): Promise<HttpServerHandle> => {
+      attempted.push(port);
+      if (port < 42044) throw Object.assign(new Error("occupied"), { code: "EADDRINUSE" });
+      return { port, close: async () => {} };
+    };
+    const result = await startServerWithPortFallback(echo, 42042, start);
+    expect(result.port).toBe(42044);
+    expect(attempted).toEqual([42042, 42043, 42044]);
+
+    const failure = Object.assign(new Error("denied"), { code: "EACCES" });
+    await expect(startServerWithPortFallback(echo, 42042, async () => { throw failure; })).rejects.toBe(failure);
+  });
+
+  it("rejects invalid ports and exhaustion", async () => {
+    await expect(startServerWithPortFallback(echo, 0)).rejects.toThrow(/between 1024 and 65535/);
+    await expect(startServerWithPortFallback(echo, 65536)).rejects.toThrow(/between 1024 and 65535/);
+    await expect(startServerWithPortFallback(echo, 65535, async () => {
+      throw Object.assign(new Error("occupied"), { code: "EADDRINUSE" });
+    })).rejects.toThrow(/No available server port/);
   });
 });

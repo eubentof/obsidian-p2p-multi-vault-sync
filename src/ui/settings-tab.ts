@@ -61,18 +61,43 @@ export class ObsyncSettingsTab extends PluginSettingTab {
       new Setting(containerEl)
         .setName("Sync server")
         .setDesc(
-          this.svc.server
-            ? `Listening on ${this.svc.serverUrl}`
+          this.plugin.listeningPort() !== null
+            ? `Listening on port ${this.plugin.listeningPort()} (on this device's network interfaces).`
             : "Not listening (desktop only)."
         )
         .addButton((b) =>
           b
-            .setButtonText(this.svc.server ? "Stop" : "Start")
+            .setButtonText(this.plugin.listeningPort() !== null ? "Stop" : "Start")
             .onClick(async () => {
               await this.plugin.toggleServer();
               this.display();
             })
         );
+
+      new Setting(containerEl)
+        .setName("Server port")
+        .setDesc("Port for this vault. If occupied when starting, Obsync tries the next port (+1) until an available port is found. Mobile devices using manual URLs must use the displayed port.")
+        .addText((t) => {
+          t.setPlaceholder("42042").setValue(String(this.plugin.serverPort));
+          t.inputEl.type = "number";
+          t.inputEl.min = "1024";
+          t.inputEl.max = "65535";
+          t.inputEl.step = "1";
+          t.inputEl.addEventListener("change", async () => {
+            const port = Number(t.getValue());
+            if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+              new Notice("Server port must be an integer between 1024 and 65535.");
+              t.setValue(String(this.plugin.serverPort));
+              return;
+            }
+            try {
+              await this.plugin.setServerPort(port);
+              this.display();
+            } catch (error) {
+              new Notice(`Unable to change port: ${error instanceof Error ? error.message : error}`);
+            }
+          });
+        });
     }
 
     if (this.plugin.isMobile()) {
