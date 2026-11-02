@@ -248,6 +248,25 @@ export async function startRawRpcServer(
   };
 }
 
+/** Start on the preferred port, advancing only when another process owns it. */
+export async function startServerWithPortFallback(
+  handler: (body: string) => Promise<string>,
+  preferredPort: number = DEFAULT_PORT,
+  start: (handler: (body: string) => Promise<string>, port: number) => Promise<HttpServerHandle> = startRawRpcServer
+): Promise<HttpServerHandle> {
+  if (!Number.isInteger(preferredPort) || preferredPort < 1024 || preferredPort > 65535) {
+    throw new RangeError("Server port must be an integer between 1024 and 65535");
+  }
+  for (let port = preferredPort; port <= 65535; port++) {
+    try {
+      return await start(handler, port);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "EADDRINUSE") throw error;
+    }
+  }
+  throw new Error(`No available server port between ${preferredPort} and 65535`);
+}
+
 export function pingMessage(): ProtocolMessage {
   return newMessage("ping", 0, {});
 }

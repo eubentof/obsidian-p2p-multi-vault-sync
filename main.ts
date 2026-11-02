@@ -8,7 +8,7 @@ import type { PairAckPayload } from "./src/core/protocol";
 import { newMessage } from "./src/core/protocol";
 import {
   RequestUrlTransport,
-  startRawRpcServer,
+  startServerWithPortFallback,
   HttpServerHandle,
   RPC_PATH,
   normalizeServerUrl,
@@ -46,6 +46,8 @@ export default class ObsyncPlugin extends Plugin {
 
   /** Server URL configured in settings (mobile). */
   serverUrl = "";
+  /** Preferred desktop listening port, stored separately in each vault. */
+  serverPort = DEFAULT_PORT;
   /** Auto-sync on vault changes + periodic polling. */
   autoSyncEnabled = true;
   autoSyncIntervalMs = 250;
@@ -96,6 +98,7 @@ export default class ObsyncPlugin extends Plugin {
     const saved = (await this.loadData()) as {
       identity?: StoredDeviceIdentity;
       serverUrl?: string;
+      serverPort?: number;
       autoSyncEnabled?: boolean;
       autoSyncIntervalMs?: number;
       scopeExcludes?: string[];
@@ -112,6 +115,10 @@ export default class ObsyncPlugin extends Plugin {
       await this.saveData({ identity: this.identity.toStored() });
     }
     if (saved?.serverUrl) this.serverUrl = saved.serverUrl;
+    if (typeof saved?.serverPort === "number" && Number.isInteger(saved.serverPort) &&
+        saved.serverPort >= 1024 && saved.serverPort <= 65535) {
+      this.serverPort = saved.serverPort;
+    }
     if (typeof saved?.autoSyncEnabled === "boolean") this.autoSyncEnabled = saved.autoSyncEnabled;
     if (typeof saved?.autoSyncIntervalMs === "number") this.autoSyncIntervalMs = saved.autoSyncIntervalMs;
     if (Array.isArray(saved?.scopeExcludes)) {
@@ -160,10 +167,15 @@ export default class ObsyncPlugin extends Plugin {
         let lastErr: unknown = null;
         for (let attempt = 0; attempt < 5 && !this.server; attempt++) {
           try {
-            this.server = await startRawRpcServer(
+            this.server = await startServerWithPortFallback(
               (body) => gate.handleBody(body),
-              DEFAULT_PORT
+              this.serverPort
             );
+            if (this.server.port !== this.serverPort) {
+              console.info(`obsync: port ${this.serverPort} is occupied; using ${this.server.port}`);
+              this.serverPort = this.server.port;
+              await this.persistServerPort();
+            }
           } catch (e) {
             lastErr = e;
             console.warn(`obsync: server auto-start attempt ${attempt + 1} failed:`, e);
@@ -177,7 +189,7 @@ export default class ObsyncPlugin extends Plugin {
     }
 
     if (Platform.isDesktop) {
-      this.connectionStatus = "connected";
+      this.connectionStatus = this.server ? "connected" : "not_found";
       this.updateStatusBar();
     } else {
       // Mobile: connect to the desktop server. With a saved URL, probe it
@@ -384,6 +396,10 @@ export default class ObsyncPlugin extends Plugin {
     return Platform.isMobile;
   }
 
+  listeningPort(): number | null {
+    return this.server?.port ?? null;
+  }
+
   private serviceState() {
     return {
       engine: this.engine,
@@ -396,6 +412,33 @@ export default class ObsyncPlugin extends Plugin {
   async saveServerUrl(url: string): Promise<void> {
     this.serverUrl = normalizeServerUrl(url);
     await this.saveData({ ...(await this.loadData()), serverUrl: this.serverUrl });
+  }
+
+  private async persistServerPort(): Promise<void> {
+    await this.saveData({ ...(await this.loadData()), serverPort: this.serverPort });
+  }
+
+  /** Change this vault's preferred port without dropping a working listener on failure. */
+  async setServerPort(port: number): Promise<void> {
+    if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+      throw new RangeError("Port must be an integer from 1024 to 65535");
+    }
+    if (port === this.serverPort) return;
+    if (this.server && this.pairing) {
+      const gate = new SecureGate(this.pairing);
+      const replacement = await startServerWithPortFallback((body) => gate.handleBody(body), port);
+      const previous = this.server;
+      this.server = replacement;
+      await previous.close();
+      if (replacement.port !== port) {
+        new Notice(`Port ${port} is occupied; Obsync is listening on ${replacement.port}.`);
+      }
+      this.serverPort = replacement.port;
+    } else {
+      this.serverPort = port;
+    }
+    await this.persistServerPort();
+    this.updateStatusBar();
   }
 
   /** This side's sync scope: whole vault minus per-file exclusions. */
@@ -551,12 +594,21 @@ export default class ObsyncPlugin extends Plugin {
     if (this.server) {
       await this.server.close();
       this.server = null;
+      this.connectionStatus = "not_found";
+      this.updateStatusBar();
       return;
     }
     if (!this.pairing) return;
     try {
       const gate = new SecureGate(this.pairing);
-      this.server = await startRawRpcServer((body) => gate.handleBody(body), DEFAULT_PORT);
+      this.server = await startServerWithPortFallback((body) => gate.handleBody(body), this.serverPort);
+      if (this.server.port !== this.serverPort) {
+        new Notice(`Port ${this.serverPort} is occupied; using ${this.server.port}.`);
+        this.serverPort = this.server.port;
+        await this.persistServerPort();
+      }
+      this.connectionStatus = "connected";
+      this.updateStatusBar();
       new Notice(`Obsync server listening on :${this.server.port}`);
     } catch (e) {
       new Notice(`Could not start server: ${e instanceof Error ? e.message : e}`);
