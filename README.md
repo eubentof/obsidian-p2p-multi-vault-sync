@@ -82,6 +82,25 @@ mobile **Server address (advanced)** field (for example,
 `http://192.168.1.5:42043`). Pair each mobile vault with its corresponding
 desktop vault.
 
+### Connect with a QR code
+
+1. On the desktop, open **Settings → Obsync → Connect phone by QR code**.
+   Choose the LAN address that your phone can reach if several are listed.
+2. Scan the code with the phone's native Camera app and open its `obsidian://`
+   link. The Obsync plugin must already be installed and enabled on mobile.
+3. Obsync shows the name of the **currently open mobile vault** and asks you
+   to confirm it before connecting. To use another mobile vault, switch to it
+   in Obsidian and scan the code again. Obsidian's public plugin API cannot
+   list or select every vault installed on a device.
+4. The mobile plugin checks that the server's public-key fingerprint matches
+   the QR code, saves the address, and requests pairing. Approve the device
+   from the desktop's **Awaiting approval** list before syncing.
+
+The QR code contains only the server's private-LAN address, active listening
+port, and public-key fingerprint; it contains no private keys or secrets. Both
+devices must be on a mutually reachable local network. The connection may
+need to be reconfigured if the desktop's LAN IP address changes.
+
 > Auto-discovery never guesses: a host is accepted only if it answers the
 > Obsync ping with a valid protocol message, so an unrelated service on the
 > same port is ignored. The URL is normalized for you: `10.174.223.140:42042`
