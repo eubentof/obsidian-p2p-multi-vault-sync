@@ -4,6 +4,8 @@ import { SyncEngine } from "../core/engine";
 import { HttpServerHandle } from "../core/transport";
 import { listAllSnapshots, restoreSnapshot } from "../core/versioning";
 import { PairingServer } from "../core/pairing";
+import qrcode from "qrcode-generator";
+import { qrConnectionUrl } from "../core/qr-pairing";
 
 interface ServiceState {
   engine: SyncEngine | null;
@@ -98,6 +100,8 @@ export class ObsyncSettingsTab extends PluginSettingTab {
             }
           });
         });
+
+      this.renderQrConnection();
     }
 
     if (this.plugin.isMobile()) {
@@ -177,6 +181,54 @@ export class ObsyncSettingsTab extends PluginSettingTab {
     void this.renderPairing();
     void this.renderConflicts();
     void this.renderSnapshots();
+  }
+
+  /** QR is regenerated from the active listener so fallback ports are accurate. */
+  private renderQrConnection(): void {
+    const { containerEl } = this;
+    new Setting(containerEl).setName("Connect phone by QR code").setHeading();
+    const port = this.plugin.listeningPort();
+    const fingerprint = this.plugin.identity?.fingerprint();
+    const addresses = this.plugin.lanAddresses();
+    if (!port || !fingerprint || addresses.length === 0) {
+      containerEl.createEl("p", {
+        text: "Start the server and connect your desktop to a local Wi-Fi or LAN to show a QR code.",
+        cls: "obsync-muted",
+      });
+      return;
+    }
+    const qrContainer = containerEl.createDiv("obsync-qr-container");
+    const show = (host: string) => {
+      qrContainer.empty();
+      const uri = qrConnectionUrl({ host, port, fingerprint });
+      const qr = qrcode(0, "M");
+      qr.addData(uri);
+      qr.make();
+      const img = qrContainer.createEl("img", {
+        attr: { src: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(qr.createSvgTag(4, 4))}`,
+          alt: "Scan with your phone's Camera app to open Obsync" },
+      });
+      img.style.width = "220px";
+      img.style.maxWidth = "100%";
+      qrContainer.createEl("p", { text: `${host}:${port} · fingerprint ${fingerprint}` });
+      new Setting(qrContainer).addButton((button) => button.setButtonText("Copy connection link").onClick(async () => {
+        await navigator.clipboard.writeText(uri);
+        new Notice("Obsync connection link copied.");
+      }));
+    };
+    if (addresses.length > 1) {
+      new Setting(containerEl).setName("Network address").setDesc("Choose the address reachable from your phone.")
+        .addDropdown((dropdown) => {
+          for (const address of addresses) dropdown.addOption(address, address);
+          dropdown.setValue(addresses[0]);
+          dropdown.onChange(show);
+        });
+    }
+    show(addresses[0]);
+    containerEl.createEl("p", {
+      text: "Scan with the native Camera app, open Obsidian, and confirm which mobile vault to connect. For a different vault, switch vaults and scan again. Device approval on desktop is still required.",
+      cls: "obsync-muted",
+    });
   }
 
   /** Selection mode + the picked files/folders in "selected" mode. */

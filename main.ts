@@ -3,7 +3,7 @@ import { ObsidianVaultAdapter } from "./src/obsidian-adapter";
 import { Store } from "./src/core/store";
 import { SyncEngine } from "./src/core/engine";
 import { SyncServer, runClientSession } from "./src/core/session";
-import { PairingClient, PairingServer } from "./src/core/pairing";
+import { PairingClient, PairingServer, fingerprintOfPublicKey } from "./src/core/pairing";
 import type { PairAckPayload } from "./src/core/protocol";
 import { newMessage } from "./src/core/protocol";
 import {
@@ -16,8 +16,10 @@ import {
 import { SecureGate } from "./src/core/secure";
 import { discoverServer, obsidianProbe, type ServerProbe } from "./src/core/discovery";
 import { ObsyncOnboardingModal } from "./src/ui/onboarding";
-import { DeviceIdentity, type StoredDeviceIdentity } from "./src/core/identity";
+import { DeviceIdentity, hexToBytesPublic, type StoredDeviceIdentity } from "./src/core/identity";
 import { ObsyncSettingsTab } from "./src/ui/settings-tab";
+import { QrConnectModal } from "./src/ui/qr-connect";
+import { parseQrConnection, isPrivateIpv4, type QrConnection } from "./src/core/qr-pairing";
 import { VaultAdapter } from "./src/core/vault";
 import type { Scope, ScopeEntry, ScopeMode } from "./src/core/scope";
 import {
@@ -46,6 +48,7 @@ export default class ObsyncPlugin extends Plugin {
 
   /** Server URL configured in settings (mobile). */
   serverUrl = "";
+  private expectedServerFingerprint = "";
   /** Preferred desktop listening port, stored separately in each vault. */
   serverPort = DEFAULT_PORT;
   /** Auto-sync on vault changes + periodic polling. */
@@ -81,6 +84,19 @@ export default class ObsyncPlugin extends Plugin {
       callback: () => this.syncNow(),
     });
 
+    this.registerObsidianProtocolHandler("obsync-connect", (params) => {
+      if (!Platform.isMobile) {
+        new Notice("Open this QR link on your mobile device.");
+        return;
+      }
+      const connection = parseQrConnection(params);
+      if (!connection) {
+        new Notice("Invalid Obsync QR code.");
+        return;
+      }
+      new QrConnectModal(this.app, connection, (details) => this.connectFromQr(details)).open();
+    });
+
     this.addCommand({
       id: "open-onboarding",
       name: "Set up connection",
@@ -98,6 +114,7 @@ export default class ObsyncPlugin extends Plugin {
     const saved = (await this.loadData()) as {
       identity?: StoredDeviceIdentity;
       serverUrl?: string;
+      expectedServerFingerprint?: string;
       serverPort?: number;
       autoSyncEnabled?: boolean;
       autoSyncIntervalMs?: number;
@@ -115,6 +132,10 @@ export default class ObsyncPlugin extends Plugin {
       await this.saveData({ identity: this.identity.toStored() });
     }
     if (saved?.serverUrl) this.serverUrl = saved.serverUrl;
+    if (typeof saved?.expectedServerFingerprint === "string" &&
+        /^[a-f0-9]{16}$/.test(saved.expectedServerFingerprint)) {
+      this.expectedServerFingerprint = saved.expectedServerFingerprint;
+    }
     if (typeof saved?.serverPort === "number" && Number.isInteger(saved.serverPort) &&
         saved.serverPort >= 1024 && saved.serverPort <= 65535) {
       this.serverPort = saved.serverPort;
@@ -400,6 +421,51 @@ export default class ObsyncPlugin extends Plugin {
     return this.server?.port ?? null;
   }
 
+  /** LAN IPv4 addresses suitable for camera-based setup on the same Wi-Fi. */
+  lanAddresses(): string[] {
+    if (Platform.isMobile) return [];
+    const os = require("os") as typeof import("os");
+    const addresses = Object.values(os.networkInterfaces()).flatMap((interfaces) =>
+      (interfaces ?? []).filter((item) => item.family === "IPv4" && !item.internal &&
+        isPrivateIpv4(item.address)).map((item) => item.address)
+    );
+    return [...new Set(addresses)];
+  }
+
+  private async connectFromQr(connection: QrConnection): Promise<boolean> {
+    if (!this.identity) return false;
+    const url = `http://${connection.host}:${connection.port}`;
+    if (!await this.probeServerUrl(url)) {
+      new Notice("The desktop server is unreachable. Connect both devices to the same network.");
+      return false;
+    }
+    const transport = new RequestUrlTransport(
+      `${url}${RPC_PATH}`,
+      (param) => requestUrl({ ...param, throw: false }),
+      15000,
+      this.identity
+    );
+    const pair = new PairingClient(this.identity);
+    const reply = await transport.exchange(newMessage("pair_request", 0, pair.buildPairRequest()));
+    if (reply.message_type !== "pair_ack") throw new Error("Unexpected pairing response");
+    const payload = reply.payload as PairAckPayload;
+    if (!payload.server_public_key ||
+        fingerprintOfPublicKey(hexToBytesPublic(payload.server_public_key)) !== connection.fingerprint) {
+      throw new Error("The desktop identity does not match the QR code");
+    }
+    this.serverUrl = url;
+    this.expectedServerFingerprint = connection.fingerprint;
+    await this.saveData({ ...(await this.loadData()), serverUrl: url,
+      expectedServerFingerprint: connection.fingerprint });
+    this.connectionStatus = "connected";
+    this.updateStatusBar();
+    this.reschedulePoll();
+    new Notice(payload.approved
+      ? "Obsync connected. You can sync this vault now."
+      : "Server verified. Approve this device in the desktop vault, then sync.");
+    return true;
+  }
+
   private serviceState() {
     return {
       engine: this.engine,
@@ -411,7 +477,10 @@ export default class ObsyncPlugin extends Plugin {
 
   async saveServerUrl(url: string): Promise<void> {
     this.serverUrl = normalizeServerUrl(url);
-    await this.saveData({ ...(await this.loadData()), serverUrl: this.serverUrl });
+    // Manual server changes must not retain the trust pin from a previous QR code.
+    this.expectedServerFingerprint = "";
+    await this.saveData({ ...(await this.loadData()), serverUrl: this.serverUrl,
+      expectedServerFingerprint: "" });
   }
 
   private async persistServerPort(): Promise<void> {
@@ -701,6 +770,10 @@ export default class ObsyncPlugin extends Plugin {
     );
     if (pairReply.message_type === "pair_ack") {
       const p = pairReply.payload as PairAckPayload & { approved: boolean };
+      if (this.expectedServerFingerprint && (!p.server_public_key ||
+          fingerprintOfPublicKey(hexToBytesPublic(p.server_public_key)) !== this.expectedServerFingerprint)) {
+        throw new Error("Obsync desktop fingerprint changed; rescan its QR code before syncing");
+      }
       if (!p.approved) {
         if (!quiet) new Notice("Obsync: device not approved by the desktop. Ask the desktop user to approve.");
         // Show the code to compare while waiting for approval.
